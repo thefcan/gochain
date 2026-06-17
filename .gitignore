@@ -1,0 +1,12 @@
+# Binaries
+/gochain
+/cmd/gochain/gochain
+bin/
+
+# Data / DB
+*.db
+*.tar
+
+# Tooling / OS
+.claude/
+.DS_Store
