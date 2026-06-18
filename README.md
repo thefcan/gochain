@@ -1,8 +1,9 @@
 # gochain
 
-A blockchain written from scratch in **Go** — proof of work, a UTXO transaction
-model, ECDSA wallets and a peer-to-peer network. Built incrementally, with tests,
-CI and Docker, to the same engineering standard as a production service.
+A blockchain written from scratch in **Go** — proof of work, persistence, a UTXO
+transaction model, ECDSA wallets and a peer-to-peer network. Built incrementally,
+with tests, CI and Docker, to the same engineering standard as a production
+service.
 
 ## Why Go?
 Go is the dominant language of blockchain **infrastructure** — go-ethereum (geth),
@@ -12,7 +13,7 @@ implementation maps directly to the work blockchain teams actually do.
 ## Status (built in phases)
 - [x] **Phase 1 — Blocks & in-memory chain** (SHA-256 linking)
 - [x] **Phase 2 — Proof of Work** (Hashcash mining, difficulty, validation)
-- [ ] Phase 3 — Persistence (BoltDB) + CLI
+- [x] **Phase 3 — Persistence (BoltDB) + CLI**
 - [ ] Phase 4 — UTXO transactions
 - [ ] Phase 5 — Wallets & addresses (ECDSA, Base58)
 - [ ] Phase 6 — Transaction signing & verification
@@ -21,34 +22,31 @@ implementation maps directly to the work blockchain teams actually do.
 ## Architecture
 ```
 gochain/
-├── cmd/gochain/      # CLI entry point
+├── cmd/gochain/      # CLI: addblock, printchain
 └── internal/
-    ├── block/        # Block type (data)
+    ├── block/        # Block type + gob serialization
     ├── pow/          # proof of work: mining + validation
-    └── chain/        # blockchain orchestration
+    └── chain/        # persistent chain (BoltDB) + iterator
 ```
-Layers are deliberately separated — `block` is plain data, `pow` is the
-algorithm, `chain` orchestrates — so there are no circular dependencies.
+Layers are deliberately separated — `block` is data, `pow` is the algorithm,
+`chain` orchestrates and persists — so there are no circular dependencies.
 
-## Proof of Work
-Each block is *mined*: the miner searches for a nonce whose SHA-256 block hash,
-read as a big integer, falls below a difficulty target (`TargetBits` leading zero
-bits). Tampering with any field invalidates the recorded proof.
+## Persistence
+Blocks are stored in an embedded **BoltDB** file (keyed by hash, with a pointer
+to the tip), so the chain survives restarts. Iteration walks from the tip back to
+genesis.
 
-```text
-Data:       Genesis Block
-Hash:       00000ca30f0c536b4618c1288d37e422b38121250e21edc033abd47c94adb4c3
-Nonce:      4619
-PoW valid:  true
-```
-
-## Run
+## CLI
 ```bash
-go run ./cmd/gochain
+go build -o gochain ./cmd/gochain
+
+./gochain addblock -data "Send 1 coin to Furkan"   # mine & append a block
+./gochain printchain                               # print the chain (tip -> genesis)
+# database path is configurable: GOCHAIN_DB=/path/to/chain.db ./gochain printchain
 ```
 
 ## Tests & benchmark
 ```bash
-go test -race ./...                       # unit tests with the race detector
-go test -bench=Run -benchmem ./internal/pow   # mining benchmark
+go test -race ./...                            # unit + persistence tests
+go test -bench=Run -benchmem ./internal/pow    # mining benchmark
 ```
