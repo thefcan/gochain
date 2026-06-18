@@ -14,7 +14,6 @@ func TestNewReturnsUnminedBlock(t *testing.T) {
 	if b.Timestamp == 0 {
 		t.Error("Timestamp was not set")
 	}
-	// Hash and Nonce are set later by proof of work.
 	if b.Hash != nil {
 		t.Errorf("Hash = %x, want nil before mining", b.Hash)
 	}
@@ -30,5 +29,24 @@ func TestGenesisData(t *testing.T) {
 	}
 	if len(g.PrevBlockHash) != 0 {
 		t.Errorf("genesis PrevBlockHash = %x, want empty", g.PrevBlockHash)
+	}
+}
+
+func TestSerializeRoundTrip(t *testing.T) {
+	orig := New("payload", []byte("prev"))
+	orig.Hash = []byte("somehash")
+	orig.Nonce = 42
+
+	data, err := orig.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	got, err := Deserialize(data)
+	if err != nil {
+		t.Fatalf("Deserialize: %v", err)
+	}
+	if string(got.Data) != "payload" || got.Nonce != 42 ||
+		string(got.Hash) != "somehash" || string(got.PrevBlockHash) != "prev" {
+		t.Errorf("round-trip mismatch: got %+v", got)
 	}
 }
