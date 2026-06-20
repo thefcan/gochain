@@ -6,11 +6,16 @@ import (
 
 	"github.com/thefcan/gochain/internal/block"
 	"github.com/thefcan/gochain/internal/tx"
+	"github.com/thefcan/gochain/internal/wallet"
 )
 
 func mineableBlock(t *testing.T, data string) *block.Block {
 	t.Helper()
-	cb, err := tx.NewCoinbaseTX("tester", data)
+	w, err := wallet.NewWallet()
+	if err != nil {
+		t.Fatalf("NewWallet: %v", err)
+	}
+	cb, err := tx.NewCoinbaseTX(w.Address(), data)
 	if err != nil {
 		t.Fatalf("NewCoinbaseTX: %v", err)
 	}
@@ -42,7 +47,6 @@ func TestValidateRejectsTamperedBlock(t *testing.T) {
 	nonce, hash := New(b).Run()
 	b.Nonce, b.Hash = nonce, hash
 
-	// Tampering with the transaction set must invalidate the proof.
 	b.Transactions[0].ID = []byte("tampered")
 	if New(b).Validate() {
 		t.Error("Validate() = true for a tampered block; want false")
@@ -50,7 +54,8 @@ func TestValidateRejectsTamperedBlock(t *testing.T) {
 }
 
 func BenchmarkRun(b *testing.B) {
-	cb, _ := tx.NewCoinbaseTX("bench", "x")
+	w, _ := wallet.NewWallet()
+	cb, _ := tx.NewCoinbaseTX(w.Address(), "x")
 	for i := 0; i < b.N; i++ {
 		blk := block.New([]*tx.Transaction{cb}, []byte{})
 		New(blk).Run()

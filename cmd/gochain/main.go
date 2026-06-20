@@ -1,6 +1,6 @@
-// Command gochain is a blockchain CLI with a UTXO transaction model and ECDSA
-// wallets. Paths are configurable via GOCHAIN_DB (chain, default gochain.db) and
-// GOCHAIN_WALLET (wallets, default wallet.dat).
+// Command gochain is a blockchain CLI: ECDSA wallets, a signed UTXO transaction
+// model and proof of work. Paths are configurable via GOCHAIN_DB (default
+// gochain.db) and GOCHAIN_WALLET (default wallet.dat).
 package main
 
 import (
@@ -19,7 +19,6 @@ func main() {
 		usage()
 		os.Exit(1)
 	}
-
 	var err error
 	switch os.Args[1] {
 	case "createwallet":
@@ -141,18 +140,25 @@ func cmdSend(args []string) error {
 	if *from == "" || *to == "" || *amount <= 0 {
 		return errors.New("send: -from, -to and a positive -amount are required")
 	}
-	if !wallet.ValidateAddress(*from) {
-		return fmt.Errorf("invalid sender address: %s", *from)
+	if !wallet.ValidateAddress(*from) || !wallet.ValidateAddress(*to) {
+		return errors.New("send: invalid -from or -to address")
 	}
-	if !wallet.ValidateAddress(*to) {
-		return fmt.Errorf("invalid recipient address: %s", *to)
+
+	ws, err := wallet.LoadWallets(walletFile())
+	if err != nil {
+		return err
 	}
+	w, ok := ws.GetWallet(*from)
+	if !ok {
+		return fmt.Errorf("no wallet for sender %s (run: gochain createwallet)", *from)
+	}
+
 	bc, err := chain.Open(dbPath())
 	if err != nil {
 		return err
 	}
 	defer bc.Close()
-	if err := bc.Send(*from, *to, *amount); err != nil {
+	if err := bc.Send(w, *to, *amount); err != nil {
 		return err
 	}
 	fmt.Printf("sent %d from %s to %s\n", *amount, *from, *to)
@@ -179,7 +185,7 @@ func cmdPrint(args []string) error {
 		for _, t := range b.Transactions {
 			fmt.Printf("  TX %x  coinbase=%t\n", t.ID, t.IsCoinbase())
 			for _, out := range t.Vout {
-				fmt.Printf("    out: %d -> %s\n", out.Value, out.ScriptPubKey)
+				fmt.Printf("    out: %d -> pkh:%x\n", out.Value, out.PubKeyHash)
 			}
 		}
 		fmt.Println()
@@ -193,6 +199,6 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `  gochain listaddresses                    list wallet addresses`)
 	fmt.Fprintln(os.Stderr, `  gochain createblockchain -address X      create a chain (genesis reward to X)`)
 	fmt.Fprintln(os.Stderr, `  gochain getbalance -address X            print X's balance`)
-	fmt.Fprintln(os.Stderr, `  gochain send -from A -to B -amount N      transfer N from A to B`)
+	fmt.Fprintln(os.Stderr, `  gochain send -from A -to B -amount N      transfer N from A to B (A's wallet signs)`)
 	fmt.Fprintln(os.Stderr, `  gochain printchain                       print the chain`)
 }

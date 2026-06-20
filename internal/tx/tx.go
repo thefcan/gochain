@@ -1,29 +1,43 @@
-// Package tx defines blockchain transactions using a simplified UTXO model.
-// In this phase, ownership is checked against a plain address string; real
-// ECDSA signatures are introduced in a later phase.
+// Package tx defines blockchain transactions using a UTXO model secured by
+// ECDSA signatures. Outputs are locked to a public-key hash; spending an output
+// requires a signature from the matching private key.
 package tx
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/gob"
-	"fmt"
+	"encoding/hex"
+	"errors"
+	"math/big"
+
+	"github.com/thefcan/gochain/internal/wallet"
 )
 
-// subsidy is the reward paid by a coinbase transaction.
-const subsidy = 10
+const (
+	subsidy = 10 // mining reward
+	sigLen  = 64 // ECDSA P-256 signature: r||s, 32 bytes each
+	keyLen  = 64 // public key: X||Y, 32 bytes each
+)
 
-// TXInput references an output of a previous transaction being spent.
+// ErrPrevTxNotFound is returned when an input references an unknown transaction.
+var ErrPrevTxNotFound = errors.New("previous transaction not found")
+
+// TXInput spends an output of a previous transaction.
 type TXInput struct {
-	Txid      []byte // the referenced transaction's ID
-	Vout      int    // index of the referenced output
-	ScriptSig string // (phase 4) the spender's address
+	Txid      []byte // referenced transaction ID
+	Vout      int    // referenced output index
+	Signature []byte // r||s over the spend
+	PubKey    []byte // spender's raw public key (X||Y)
 }
 
-// TXOutput holds coins payable to whoever can unlock ScriptPubKey.
+// TXOutput holds coins locked to a public-key hash.
 type TXOutput struct {
-	Value        int
-	ScriptPubKey string // (phase 4) the recipient's address
+	Value      int
+	PubKeyHash []byte
 }
 
 // Transaction is a set of inputs spending earlier outputs and new outputs.
@@ -33,39 +47,148 @@ type Transaction struct {
 	Vout []TXOutput
 }
 
-// CanUnlockOutputWith reports whether the input was authorised by address.
-func (in *TXInput) CanUnlockOutputWith(address string) bool { return in.ScriptSig == address }
+// UsesKey reports whether the input is signed by the owner of pubKeyHash.
+func (in *TXInput) UsesKey(pubKeyHash []byte) bool {
+	return bytes.Equal(wallet.HashPubKey(in.PubKey), pubKeyHash)
+}
 
-// CanBeUnlockedWith reports whether the output is payable to address.
-func (out *TXOutput) CanBeUnlockedWith(address string) bool { return out.ScriptPubKey == address }
+// IsLockedWithKey reports whether the output is payable to pubKeyHash.
+func (out *TXOutput) IsLockedWithKey(pubKeyHash []byte) bool {
+	return bytes.Equal(out.PubKeyHash, pubKeyHash)
+}
+
+// NewTXOutput creates an output of value locked to address.
+func NewTXOutput(value int, address string) (*TXOutput, error) {
+	pubKeyHash, err := wallet.PubKeyHashFromAddress(address)
+	if err != nil {
+		return nil, err
+	}
+	return &TXOutput{Value: value, PubKeyHash: pubKeyHash}, nil
+}
 
 // IsCoinbase reports whether tx is a coinbase (mining reward) transaction.
 func (tx *Transaction) IsCoinbase() bool {
 	return len(tx.Vin) == 1 && len(tx.Vin[0].Txid) == 0 && tx.Vin[0].Vout == -1
 }
 
-// SetID computes and stores the transaction's SHA-256 hash as its ID.
-func (tx *Transaction) SetID() error {
+// Hash returns the SHA-256 hash of the transaction with its ID field cleared.
+func (tx *Transaction) Hash() ([]byte, error) {
+	clone := *tx
+	clone.ID = nil
 	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(tx); err != nil {
-		return err
+	if err := gob.NewEncoder(&buf).Encode(clone); err != nil {
+		return nil, err
 	}
-	hash := sha256.Sum256(buf.Bytes())
-	tx.ID = hash[:]
-	return nil
+	h := sha256.Sum256(buf.Bytes())
+	return h[:], nil
 }
 
 // NewCoinbaseTX creates a coinbase transaction paying the subsidy to `to`.
 func NewCoinbaseTX(to, data string) (*Transaction, error) {
-	if data == "" {
-		data = fmt.Sprintf("Reward to %s", to)
-	}
-	tx := &Transaction{
-		Vin:  []TXInput{{Txid: []byte{}, Vout: -1, ScriptSig: data}},
-		Vout: []TXOutput{{Value: subsidy, ScriptPubKey: to}},
-	}
-	if err := tx.SetID(); err != nil {
+	out, err := NewTXOutput(subsidy, to)
+	if err != nil {
 		return nil, err
 	}
+	tx := &Transaction{
+		Vin:  []TXInput{{Txid: []byte{}, Vout: -1, PubKey: []byte(data)}},
+		Vout: []TXOutput{*out},
+	}
+	id, err := tx.Hash()
+	if err != nil {
+		return nil, err
+	}
+	tx.ID = id
 	return tx, nil
+}
+
+// TrimmedCopy returns a copy with input signatures and pubkeys cleared, used as
+// the basis for signing and verifying.
+func (tx *Transaction) TrimmedCopy() Transaction {
+	inputs := make([]TXInput, 0, len(tx.Vin))
+	for _, vin := range tx.Vin {
+		inputs = append(inputs, TXInput{Txid: vin.Txid, Vout: vin.Vout})
+	}
+	outputs := make([]TXOutput, 0, len(tx.Vout))
+	for _, vout := range tx.Vout {
+		outputs = append(outputs, TXOutput{Value: vout.Value, PubKeyHash: vout.PubKeyHash})
+	}
+	return Transaction{ID: tx.ID, Vin: inputs, Vout: outputs}
+}
+
+// Sign signs each input with priv, using the referenced previous transactions.
+func (tx *Transaction) Sign(priv ecdsa.PrivateKey, prevTXs map[string]Transaction) error {
+	if tx.IsCoinbase() {
+		return nil
+	}
+	for _, vin := range tx.Vin {
+		if prevTXs[hex.EncodeToString(vin.Txid)].ID == nil {
+			return ErrPrevTxNotFound
+		}
+	}
+
+	txCopy := tx.TrimmedCopy()
+	for inID, vin := range txCopy.Vin {
+		prevTX := prevTXs[hex.EncodeToString(vin.Txid)]
+		txCopy.Vin[inID].Signature = nil
+		txCopy.Vin[inID].PubKey = prevTX.Vout[vin.Vout].PubKeyHash
+
+		dataToSign, err := txCopy.Hash()
+		if err != nil {
+			return err
+		}
+		txCopy.Vin[inID].PubKey = nil
+
+		r, s, err := ecdsa.Sign(rand.Reader, &priv, dataToSign)
+		if err != nil {
+			return err
+		}
+		sig := make([]byte, sigLen)
+		r.FillBytes(sig[:sigLen/2])
+		s.FillBytes(sig[sigLen/2:])
+		tx.Vin[inID].Signature = sig
+	}
+	return nil
+}
+
+// Verify checks every input signature against the referenced previous outputs.
+func (tx *Transaction) Verify(prevTXs map[string]Transaction) (bool, error) {
+	if tx.IsCoinbase() {
+		return true, nil
+	}
+	for _, vin := range tx.Vin {
+		if prevTXs[hex.EncodeToString(vin.Txid)].ID == nil {
+			return false, ErrPrevTxNotFound
+		}
+	}
+
+	txCopy := tx.TrimmedCopy()
+	curve := elliptic.P256()
+	for inID, vin := range tx.Vin {
+		prevTX := prevTXs[hex.EncodeToString(vin.Txid)]
+		if vin.Vout >= len(prevTX.Vout) {
+			return false, nil
+		}
+		txCopy.Vin[inID].Signature = nil
+		txCopy.Vin[inID].PubKey = prevTX.Vout[vin.Vout].PubKeyHash
+
+		dataToVerify, err := txCopy.Hash()
+		if err != nil {
+			return false, err
+		}
+		txCopy.Vin[inID].PubKey = nil
+
+		if len(vin.Signature) != sigLen || len(vin.PubKey) != keyLen {
+			return false, nil
+		}
+		r := new(big.Int).SetBytes(vin.Signature[:sigLen/2])
+		s := new(big.Int).SetBytes(vin.Signature[sigLen/2:])
+		x := new(big.Int).SetBytes(vin.PubKey[:keyLen/2])
+		y := new(big.Int).SetBytes(vin.PubKey[keyLen/2:])
+		pub := ecdsa.PublicKey{Curve: curve, X: x, Y: y}
+
+		if !ecdsa.Verify(&pub, dataToVerify, r, s) {
+			return false, nil
+		}
+	}
+	return true, nil
 }

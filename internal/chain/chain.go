@@ -1,8 +1,10 @@
-// Package chain implements a persistent UTXO blockchain stored in BoltDB.
-// It mines blocks, tracks unspent transaction outputs and builds transfers.
+// Package chain implements a persistent UTXO blockchain stored in BoltDB, with
+// ECDSA-signed transactions verified before a block is mined.
 package chain
 
 import (
+	"bytes"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"github.com/thefcan/gochain/internal/block"
 	"github.com/thefcan/gochain/internal/pow"
 	"github.com/thefcan/gochain/internal/tx"
+	"github.com/thefcan/gochain/internal/wallet"
 )
 
 const (
@@ -19,11 +22,11 @@ const (
 	tipKey       = "l"
 )
 
-// Sentinel errors.
 var (
-	ErrChainExists       = errors.New("blockchain already exists")
-	ErrNoChain           = errors.New("no blockchain found; create one first")
-	ErrInsufficientFunds = errors.New("not enough funds")
+	ErrChainExists        = errors.New("blockchain already exists")
+	ErrNoChain            = errors.New("no blockchain found; create one first")
+	ErrInsufficientFunds  = errors.New("not enough funds")
+	ErrInvalidTransaction = errors.New("invalid transaction")
 )
 
 // Blockchain is a UTXO blockchain backed by a BoltDB database.
@@ -32,14 +35,13 @@ type Blockchain struct {
 	tip []byte
 }
 
-// CreateBlockchain creates a new chain whose genesis block pays the mining
-// subsidy to address. It fails with ErrChainExists if one already exists.
+// CreateBlockchain creates a new chain whose genesis block pays the subsidy to
+// address. It fails with ErrChainExists if one already exists.
 func CreateBlockchain(dbPath, address string) (*Blockchain, error) {
 	db, err := bbolt.Open(dbPath, 0600, nil)
 	if err != nil {
 		return nil, err
 	}
-
 	coinbase, err := tx.NewCoinbaseTX(address, "")
 	if err != nil {
 		db.Close()
@@ -97,8 +99,19 @@ func Open(dbPath string) (*Blockchain, error) {
 // Close releases the database.
 func (bc *Blockchain) Close() error { return bc.db.Close() }
 
-// MineBlock mines a new block containing txs and persists it as the new tip.
+// MineBlock verifies every (non-coinbase) transaction, then mines and stores a
+// new block as the tip.
 func (bc *Blockchain) MineBlock(txs []*tx.Transaction) error {
+	for _, t := range txs {
+		ok, err := bc.VerifyTransaction(t)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrInvalidTransaction
+		}
+	}
+
 	newBlock := block.New(txs, bc.tip)
 	mine(newBlock)
 
@@ -132,12 +145,10 @@ type Iterator struct {
 	currentHash []byte
 }
 
-// Iterator returns a new iterator positioned at the tip.
 func (bc *Blockchain) Iterator() *Iterator {
 	return &Iterator{db: bc.db, currentHash: bc.tip}
 }
 
-// Next returns the next block (tip first), or (nil, nil) at the end.
 func (it *Iterator) Next() (*block.Block, error) {
 	if len(it.currentHash) == 0 {
 		return nil, nil
@@ -159,10 +170,8 @@ func (it *Iterator) Next() (*block.Block, error) {
 	return b, nil
 }
 
-// FindUTXO returns all unspent outputs payable to address. Iterating tip->genesis
-// means a spending input is always seen before the output it spends, so spent
-// outputs are correctly excluded (no double counting).
-func (bc *Blockchain) FindUTXO(address string) ([]tx.TXOutput, error) {
+// findUTXO returns all unspent outputs locked to pubKeyHash.
+func (bc *Blockchain) findUTXO(pubKeyHash []byte) ([]tx.TXOutput, error) {
 	var utxos []tx.TXOutput
 	spent := make(map[string][]int)
 
@@ -181,13 +190,13 @@ func (bc *Blockchain) FindUTXO(address string) ([]tx.TXOutput, error) {
 				if isSpent(spent, txID, outIdx) {
 					continue
 				}
-				if out.CanBeUnlockedWith(address) {
+				if out.IsLockedWithKey(pubKeyHash) {
 					utxos = append(utxos, out)
 				}
 			}
 			if !t.IsCoinbase() {
 				for _, in := range t.Vin {
-					if in.CanUnlockOutputWith(address) {
+					if in.UsesKey(pubKeyHash) {
 						k := hex.EncodeToString(in.Txid)
 						spent[k] = append(spent[k], in.Vout)
 					}
@@ -200,7 +209,11 @@ func (bc *Blockchain) FindUTXO(address string) ([]tx.TXOutput, error) {
 
 // Balance returns the total unspent value held by address.
 func (bc *Blockchain) Balance(address string) (int, error) {
-	utxos, err := bc.FindUTXO(address)
+	pubKeyHash, err := wallet.PubKeyHashFromAddress(address)
+	if err != nil {
+		return 0, err
+	}
+	utxos, err := bc.findUTXO(pubKeyHash)
 	if err != nil {
 		return 0, err
 	}
@@ -211,9 +224,9 @@ func (bc *Blockchain) Balance(address string) (int, error) {
 	return balance, nil
 }
 
-// FindSpendableOutputs collects enough of address's unspent outputs to cover
+// FindSpendableOutputs collects enough of pubKeyHash's unspent outputs to cover
 // amount, returning the total found and a txID->output-indices map.
-func (bc *Blockchain) FindSpendableOutputs(address string, amount int) (int, map[string][]int, error) {
+func (bc *Blockchain) FindSpendableOutputs(pubKeyHash []byte, amount int) (int, map[string][]int, error) {
 	unspent := make(map[string][]int)
 	spent := make(map[string][]int)
 	accumulated := 0
@@ -234,7 +247,7 @@ Work:
 				if isSpent(spent, txID, outIdx) {
 					continue
 				}
-				if out.CanBeUnlockedWith(address) {
+				if out.IsLockedWithKey(pubKeyHash) {
 					accumulated += out.Value
 					unspent[txID] = append(unspent[txID], outIdx)
 					if accumulated >= amount {
@@ -244,7 +257,7 @@ Work:
 			}
 			if !t.IsCoinbase() {
 				for _, in := range t.Vin {
-					if in.CanUnlockOutputWith(address) {
+					if in.UsesKey(pubKeyHash) {
 						k := hex.EncodeToString(in.Txid)
 						spent[k] = append(spent[k], in.Vout)
 					}
@@ -255,9 +268,63 @@ Work:
 	return accumulated, unspent, nil
 }
 
-// NewUTXOTransaction builds (but does not mine) a transfer of amount from -> to.
-func (bc *Blockchain) NewUTXOTransaction(from, to string, amount int) (*tx.Transaction, error) {
-	acc, validOutputs, err := bc.FindSpendableOutputs(from, amount)
+// FindTransaction looks up a transaction by ID across the whole chain.
+func (bc *Blockchain) FindTransaction(id []byte) (tx.Transaction, error) {
+	it := bc.Iterator()
+	for {
+		b, err := it.Next()
+		if err != nil {
+			return tx.Transaction{}, err
+		}
+		if b == nil {
+			break
+		}
+		for _, t := range b.Transactions {
+			if bytes.Equal(t.ID, id) {
+				return *t, nil
+			}
+		}
+	}
+	return tx.Transaction{}, errors.New("transaction not found")
+}
+
+func (bc *Blockchain) gatherPrevTXs(t *tx.Transaction) (map[string]tx.Transaction, error) {
+	prevTXs := make(map[string]tx.Transaction)
+	for _, vin := range t.Vin {
+		prevTX, err := bc.FindTransaction(vin.Txid)
+		if err != nil {
+			return nil, err
+		}
+		prevTXs[hex.EncodeToString(prevTX.ID)] = prevTX
+	}
+	return prevTXs, nil
+}
+
+// SignTransaction signs t with priv, resolving the referenced previous outputs.
+func (bc *Blockchain) SignTransaction(t *tx.Transaction, priv ecdsa.PrivateKey) error {
+	prevTXs, err := bc.gatherPrevTXs(t)
+	if err != nil {
+		return err
+	}
+	return t.Sign(priv, prevTXs)
+}
+
+// VerifyTransaction verifies t's signatures against the referenced outputs.
+func (bc *Blockchain) VerifyTransaction(t *tx.Transaction) (bool, error) {
+	if t.IsCoinbase() {
+		return true, nil
+	}
+	prevTXs, err := bc.gatherPrevTXs(t)
+	if err != nil {
+		return false, err
+	}
+	return t.Verify(prevTXs)
+}
+
+// NewUTXOTransaction builds and signs a transfer of amount from w to address.
+func (bc *Blockchain) NewUTXOTransaction(w *wallet.Wallet, to string, amount int) (*tx.Transaction, error) {
+	pubKeyHash := wallet.HashPubKey(w.PublicKey)
+	acc, validOutputs, err := bc.FindSpendableOutputs(pubKeyHash, amount)
 	if err != nil {
 		return nil, err
 	}
@@ -272,25 +339,36 @@ func (bc *Blockchain) NewUTXOTransaction(from, to string, amount int) (*tx.Trans
 			return nil, err
 		}
 		for _, out := range outs {
-			inputs = append(inputs, tx.TXInput{Txid: id, Vout: out, ScriptSig: from})
+			inputs = append(inputs, tx.TXInput{Txid: id, Vout: out, PubKey: w.PublicKey})
 		}
 	}
 
-	outputs := []tx.TXOutput{{Value: amount, ScriptPubKey: to}}
+	out, err := tx.NewTXOutput(amount, to)
+	if err != nil {
+		return nil, err
+	}
+	outputs := []tx.TXOutput{*out}
 	if acc > amount {
-		outputs = append(outputs, tx.TXOutput{Value: acc - amount, ScriptPubKey: from}) // change
+		change, err := tx.NewTXOutput(acc-amount, w.Address())
+		if err != nil {
+			return nil, err
+		}
+		outputs = append(outputs, *change)
 	}
 
 	t := &tx.Transaction{Vin: inputs, Vout: outputs}
-	if err := t.SetID(); err != nil {
+	if t.ID, err = t.Hash(); err != nil {
+		return nil, err
+	}
+	if err := bc.SignTransaction(t, w.PrivateKey); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
-// Send mines a block transferring amount from -> to.
-func (bc *Blockchain) Send(from, to string, amount int) error {
-	t, err := bc.NewUTXOTransaction(from, to, amount)
+// Send builds, signs and mines a transfer of amount from w to address.
+func (bc *Blockchain) Send(w *wallet.Wallet, to string, amount int) error {
+	t, err := bc.NewUTXOTransaction(w, to, amount)
 	if err != nil {
 		return err
 	}

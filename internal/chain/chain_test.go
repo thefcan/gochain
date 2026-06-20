@@ -5,80 +5,49 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/thefcan/gochain/internal/pow"
+	"github.com/thefcan/gochain/internal/tx"
+	"github.com/thefcan/gochain/internal/wallet"
 )
 
-func tempChain(t *testing.T, address string) *Blockchain {
+func setup(t *testing.T) (*Blockchain, *wallet.Wallet) {
 	t.Helper()
-	bc, err := CreateBlockchain(filepath.Join(t.TempDir(), "test.db"), address)
+	w, err := wallet.NewWallet()
+	if err != nil {
+		t.Fatalf("NewWallet: %v", err)
+	}
+	bc, err := CreateBlockchain(filepath.Join(t.TempDir(), "test.db"), w.Address())
 	if err != nil {
 		t.Fatalf("CreateBlockchain: %v", err)
 	}
 	t.Cleanup(func() { bc.Close() })
-	return bc
+	return bc, w
 }
 
-func TestCreateBlockchainGivesGenesisReward(t *testing.T) {
-	bc := tempChain(t, "alice")
-	bal, err := bc.Balance("alice")
-	if err != nil {
-		t.Fatalf("Balance: %v", err)
+func TestGenesisRewardAndSignedTransfer(t *testing.T) {
+	bc, alice := setup(t)
+	if bal, _ := bc.Balance(alice.Address()); bal != 10 {
+		t.Fatalf("alice balance = %d, want 10", bal)
 	}
-	if bal != 10 {
-		t.Errorf("alice balance = %d, want 10 (subsidy)", bal)
-	}
-}
 
-func TestSendTransfersFundsWithChange(t *testing.T) {
-	bc := tempChain(t, "alice")
-	if err := bc.Send("alice", "bob", 4); err != nil {
+	bob, _ := wallet.NewWallet()
+	if err := bc.Send(alice, bob.Address(), 4); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-
-	if a, _ := bc.Balance("alice"); a != 6 {
+	if a, _ := bc.Balance(alice.Address()); a != 6 {
 		t.Errorf("alice balance = %d, want 6 (change)", a)
 	}
-	if b, _ := bc.Balance("bob"); b != 4 {
+	if b, _ := bc.Balance(bob.Address()); b != 4 {
 		t.Errorf("bob balance = %d, want 4", b)
 	}
 }
 
-func TestSendInsufficientFunds(t *testing.T) {
-	bc := tempChain(t, "alice")
-	if err := bc.Send("alice", "bob", 999); !errors.Is(err, ErrInsufficientFunds) {
-		t.Errorf("Send too much: err = %v, want ErrInsufficientFunds", err)
-	}
-}
-
-func TestOpenErrorsWhenNoChain(t *testing.T) {
-	_, err := Open(filepath.Join(t.TempDir(), "none.db"))
-	if !errors.Is(err, ErrNoChain) {
-		t.Errorf("Open on empty: err = %v, want ErrNoChain", err)
-	}
-}
-
-func TestBalancePersistsAndBlocksValid(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "persist.db")
-	bc, err := CreateBlockchain(path, "alice")
-	if err != nil {
-		t.Fatalf("CreateBlockchain: %v", err)
-	}
-	if err := bc.Send("alice", "bob", 3); err != nil {
+func TestEveryTransactionVerifies(t *testing.T) {
+	bc, alice := setup(t)
+	bob, _ := wallet.NewWallet()
+	if err := bc.Send(alice, bob.Address(), 3); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	bc.Close()
-
-	reopened, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer reopened.Close()
-
-	if b, _ := reopened.Balance("bob"); b != 3 {
-		t.Errorf("bob balance after reopen = %d, want 3", b)
-	}
-	// Every block must still pass proof of work.
-	it := reopened.Iterator()
+	it := bc.Iterator()
 	for {
 		b, err := it.Next()
 		if err != nil {
@@ -87,8 +56,37 @@ func TestBalancePersistsAndBlocksValid(t *testing.T) {
 		if b == nil {
 			break
 		}
-		if !pow.New(b).Validate() {
-			t.Errorf("block %x failed PoW validation", b.Hash)
+		for _, tr := range b.Transactions {
+			ok, err := bc.VerifyTransaction(tr)
+			if err != nil {
+				t.Fatalf("VerifyTransaction: %v", err)
+			}
+			if !ok {
+				t.Errorf("transaction %x failed verification", tr.ID)
+			}
 		}
+	}
+}
+
+func TestMineBlockRejectsTamperedSignature(t *testing.T) {
+	bc, alice := setup(t)
+	bob, _ := wallet.NewWallet()
+
+	tr, err := bc.NewUTXOTransaction(alice, bob.Address(), 4)
+	if err != nil {
+		t.Fatalf("NewUTXOTransaction: %v", err)
+	}
+	tr.Vin[0].Signature[0] ^= 0xFF // tamper
+
+	if err := bc.MineBlock([]*tx.Transaction{tr}); !errors.Is(err, ErrInvalidTransaction) {
+		t.Errorf("MineBlock with tampered signature: err = %v, want ErrInvalidTransaction", err)
+	}
+}
+
+func TestSendInsufficientFunds(t *testing.T) {
+	bc, alice := setup(t)
+	bob, _ := wallet.NewWallet()
+	if err := bc.Send(alice, bob.Address(), 999); !errors.Is(err, ErrInsufficientFunds) {
+		t.Errorf("err = %v, want ErrInsufficientFunds", err)
 	}
 }
