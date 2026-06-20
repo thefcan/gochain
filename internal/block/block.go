@@ -1,37 +1,44 @@
 // Package block defines the Block type — a single, hash-linked entry in the
-// chain — and its gob (de)serialization for storage. The block's hash and nonce
-// are produced by proof of work (see the pow package).
+// chain — and its gob (de)serialization. A block carries a set of transactions;
+// its hash and nonce are produced by proof of work (see the pow package).
 package block
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/gob"
 	"time"
+
+	"github.com/thefcan/gochain/internal/tx"
 )
 
-// Block is one link in the chain. Each block commits to the previous block's
-// hash, forming a tamper-evident sequence. Hash and Nonce are filled in by
-// proof of work after construction.
+// Block is one link in the chain.
 type Block struct {
 	Timestamp     int64
-	Data          []byte
+	Transactions  []*tx.Transaction
 	PrevBlockHash []byte
 	Hash          []byte
 	Nonce         int
 }
 
-// New creates an unmined block from data and the previous block's hash.
-func New(data string, prevBlockHash []byte) *Block {
+// New creates an unmined block from transactions and the previous block's hash.
+func New(transactions []*tx.Transaction, prevBlockHash []byte) *Block {
 	return &Block{
 		Timestamp:     time.Now().Unix(),
-		Data:          []byte(data),
+		Transactions:  transactions,
 		PrevBlockHash: prevBlockHash,
 	}
 }
 
-// NewGenesis creates the (still unmined) first block of a chain.
-func NewGenesis() *Block {
-	return New("Genesis Block", []byte{})
+// HashTransactions returns a single hash over the block's transaction IDs (a
+// simplified Merkle root) for use in proof of work.
+func (b *Block) HashTransactions() []byte {
+	var ids [][]byte
+	for _, t := range b.Transactions {
+		ids = append(ids, t.ID)
+	}
+	sum := sha256.Sum256(bytes.Join(ids, []byte{}))
+	return sum[:]
 }
 
 // Serialize encodes the block to bytes for storage.

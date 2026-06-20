@@ -5,10 +5,20 @@ import (
 	"testing"
 
 	"github.com/thefcan/gochain/internal/block"
+	"github.com/thefcan/gochain/internal/tx"
 )
 
+func mineableBlock(t *testing.T, data string) *block.Block {
+	t.Helper()
+	cb, err := tx.NewCoinbaseTX("tester", data)
+	if err != nil {
+		t.Fatalf("NewCoinbaseTX: %v", err)
+	}
+	return block.New([]*tx.Transaction{cb}, []byte{})
+}
+
 func TestRunProducesValidHash(t *testing.T) {
-	b := block.New("mine me", []byte{})
+	b := mineableBlock(t, "mine me")
 	p := New(b)
 
 	nonce, hash := p.Run()
@@ -28,20 +38,21 @@ func TestRunProducesValidHash(t *testing.T) {
 }
 
 func TestValidateRejectsTamperedBlock(t *testing.T) {
-	b := block.New("honest", []byte{})
+	b := mineableBlock(t, "honest")
 	nonce, hash := New(b).Run()
 	b.Nonce, b.Hash = nonce, hash
 
-	// Tampering with the data after mining must invalidate the proof.
-	b.Data = []byte("tampered")
+	// Tampering with the transaction set must invalidate the proof.
+	b.Transactions[0].ID = []byte("tampered")
 	if New(b).Validate() {
 		t.Error("Validate() = true for a tampered block; want false")
 	}
 }
 
 func BenchmarkRun(b *testing.B) {
+	cb, _ := tx.NewCoinbaseTX("bench", "x")
 	for i := 0; i < b.N; i++ {
-		blk := block.New("benchmark", []byte{})
+		blk := block.New([]*tx.Transaction{cb}, []byte{})
 		New(blk).Run()
 	}
 }

@@ -31,11 +31,12 @@ func New(b *block.Block) *ProofOfWork {
 	return &ProofOfWork{block: b, target: target}
 }
 
-// prepareData serialises the block's headers together with a candidate nonce.
+// prepareData serialises the block's headers (including a Merkle-style hash of
+// its transactions) together with a candidate nonce.
 func (pow *ProofOfWork) prepareData(nonce int) []byte {
 	return bytes.Join([][]byte{
 		pow.block.PrevBlockHash,
-		pow.block.Data,
+		pow.block.HashTransactions(),
 		[]byte(strconv.FormatInt(pow.block.Timestamp, 10)),
 		[]byte(strconv.Itoa(TargetBits)),
 		[]byte(strconv.Itoa(nonce)),
