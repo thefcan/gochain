@@ -1,6 +1,6 @@
-// Command gochain is a blockchain CLI: ECDSA wallets, a signed UTXO transaction
-// model and proof of work. Paths are configurable via GOCHAIN_DB (default
-// gochain.db) and GOCHAIN_WALLET (default wallet.dat).
+// Command gochain is a blockchain CLI: ECDSA wallets, signed UTXO transactions,
+// proof of work, persistence and peer-to-peer sync. Paths are configurable via
+// GOCHAIN_DB (default gochain.db) and GOCHAIN_WALLET (default wallet.dat).
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 
 	"github.com/thefcan/gochain/internal/chain"
+	"github.com/thefcan/gochain/internal/network"
 	"github.com/thefcan/gochain/internal/pow"
 	"github.com/thefcan/gochain/internal/wallet"
 )
@@ -33,6 +34,10 @@ func main() {
 		err = cmdSend(os.Args[2:])
 	case "printchain":
 		err = cmdPrint(os.Args[2:])
+	case "startnode":
+		err = cmdStartNode(os.Args[2:])
+	case "sync":
+		err = cmdSync(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -143,7 +148,6 @@ func cmdSend(args []string) error {
 	if !wallet.ValidateAddress(*from) || !wallet.ValidateAddress(*to) {
 		return errors.New("send: invalid -from or -to address")
 	}
-
 	ws, err := wallet.LoadWallets(walletFile())
 	if err != nil {
 		return err
@@ -152,7 +156,6 @@ func cmdSend(args []string) error {
 	if !ok {
 		return fmt.Errorf("no wallet for sender %s (run: gochain createwallet)", *from)
 	}
-
 	bc, err := chain.Open(dbPath())
 	if err != nil {
 		return err
@@ -171,7 +174,6 @@ func cmdPrint(args []string) error {
 		return err
 	}
 	defer bc.Close()
-
 	it := bc.Iterator()
 	for {
 		b, err := it.Next()
@@ -193,12 +195,54 @@ func cmdPrint(args []string) error {
 	return nil
 }
 
+func cmdStartNode(args []string) error {
+	fs := flag.NewFlagSet("startnode", flag.ExitOnError)
+	port := fs.String("port", "3000", "TCP port to serve on")
+	_ = fs.Parse(args)
+
+	bc, err := chain.OpenOrInit(dbPath())
+	if err != nil {
+		return err
+	}
+	defer bc.Close()
+
+	ln, err := network.NewNode(bc).Listen("localhost:" + *port)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
+	fmt.Printf("node serving chain on %s (ctrl-c to stop)\n", ln.Addr())
+	select {} // block until killed
+}
+
+func cmdSync(args []string) error {
+	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+	peer := fs.String("peer", "", "peer address, e.g. localhost:3000")
+	_ = fs.Parse(args)
+	if *peer == "" {
+		return errors.New("sync: -peer is required")
+	}
+	bc, err := chain.OpenOrInit(dbPath())
+	if err != nil {
+		return err
+	}
+	defer bc.Close()
+	added, err := network.NewNode(bc).SyncFrom(*peer)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("synced %d new block(s) from %s\n", added, *peer)
+	return nil
+}
+
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, `  gochain createwallet                     generate a new wallet/address`)
 	fmt.Fprintln(os.Stderr, `  gochain listaddresses                    list wallet addresses`)
 	fmt.Fprintln(os.Stderr, `  gochain createblockchain -address X      create a chain (genesis reward to X)`)
 	fmt.Fprintln(os.Stderr, `  gochain getbalance -address X            print X's balance`)
-	fmt.Fprintln(os.Stderr, `  gochain send -from A -to B -amount N      transfer N from A to B (A's wallet signs)`)
+	fmt.Fprintln(os.Stderr, `  gochain send -from A -to B -amount N      transfer N from A to B`)
 	fmt.Fprintln(os.Stderr, `  gochain printchain                       print the chain`)
+	fmt.Fprintln(os.Stderr, `  gochain startnode -port 3000             serve the chain to peers`)
+	fmt.Fprintln(os.Stderr, `  gochain sync -peer localhost:3000        download blocks from a peer`)
 }
