@@ -1,5 +1,6 @@
-// Command gochain is a blockchain CLI with a UTXO transaction model. The
-// database path is configurable via GOCHAIN_DB (default: gochain.db).
+// Command gochain is a blockchain CLI with a UTXO transaction model and ECDSA
+// wallets. Paths are configurable via GOCHAIN_DB (chain, default gochain.db) and
+// GOCHAIN_WALLET (wallets, default wallet.dat).
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 
 	"github.com/thefcan/gochain/internal/chain"
 	"github.com/thefcan/gochain/internal/pow"
+	"github.com/thefcan/gochain/internal/wallet"
 )
 
 func main() {
@@ -20,6 +22,10 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "createwallet":
+		err = cmdCreateWallet(os.Args[2:])
+	case "listaddresses":
+		err = cmdListAddresses(os.Args[2:])
 	case "createblockchain":
 		err = cmdCreate(os.Args[2:])
 	case "getbalance":
@@ -45,12 +51,54 @@ func dbPath() string {
 	return "gochain.db"
 }
 
+func walletFile() string {
+	if p := os.Getenv("GOCHAIN_WALLET"); p != "" {
+		return p
+	}
+	return "wallet.dat"
+}
+
+func cmdCreateWallet(args []string) error {
+	ws, err := wallet.LoadWallets(walletFile())
+	if err != nil {
+		return err
+	}
+	addr, err := ws.CreateWallet()
+	if err != nil {
+		return err
+	}
+	if err := ws.Save(walletFile()); err != nil {
+		return err
+	}
+	fmt.Printf("new address: %s\n", addr)
+	return nil
+}
+
+func cmdListAddresses(args []string) error {
+	ws, err := wallet.LoadWallets(walletFile())
+	if err != nil {
+		return err
+	}
+	addrs := ws.GetAddresses()
+	if len(addrs) == 0 {
+		fmt.Println("no wallets yet; run: gochain createwallet")
+		return nil
+	}
+	for _, a := range addrs {
+		fmt.Println(a)
+	}
+	return nil
+}
+
 func cmdCreate(args []string) error {
 	fs := flag.NewFlagSet("createblockchain", flag.ExitOnError)
 	address := fs.String("address", "", "address to receive the genesis reward")
 	_ = fs.Parse(args)
 	if *address == "" {
 		return errors.New("createblockchain: -address is required")
+	}
+	if !wallet.ValidateAddress(*address) {
+		return fmt.Errorf("invalid address: %s", *address)
 	}
 	bc, err := chain.CreateBlockchain(dbPath(), *address)
 	if err != nil {
@@ -67,6 +115,9 @@ func cmdBalance(args []string) error {
 	_ = fs.Parse(args)
 	if *address == "" {
 		return errors.New("getbalance: -address is required")
+	}
+	if !wallet.ValidateAddress(*address) {
+		return fmt.Errorf("invalid address: %s", *address)
 	}
 	bc, err := chain.Open(dbPath())
 	if err != nil {
@@ -89,6 +140,12 @@ func cmdSend(args []string) error {
 	_ = fs.Parse(args)
 	if *from == "" || *to == "" || *amount <= 0 {
 		return errors.New("send: -from, -to and a positive -amount are required")
+	}
+	if !wallet.ValidateAddress(*from) {
+		return fmt.Errorf("invalid sender address: %s", *from)
+	}
+	if !wallet.ValidateAddress(*to) {
+		return fmt.Errorf("invalid recipient address: %s", *to)
 	}
 	bc, err := chain.Open(dbPath())
 	if err != nil {
@@ -119,12 +176,8 @@ func cmdPrint(args []string) error {
 			break
 		}
 		fmt.Printf("Block %x  (PoW valid: %t)\n", b.Hash, pow.New(b).Validate())
-		fmt.Printf("  Prev: %x\n", b.PrevBlockHash)
 		for _, t := range b.Transactions {
 			fmt.Printf("  TX %x  coinbase=%t\n", t.ID, t.IsCoinbase())
-			for _, in := range t.Vin {
-				fmt.Printf("    in:  tx=%x vout=%d sig=%s\n", in.Txid, in.Vout, in.ScriptSig)
-			}
 			for _, out := range t.Vout {
 				fmt.Printf("    out: %d -> %s\n", out.Value, out.ScriptPubKey)
 			}
@@ -136,6 +189,8 @@ func cmdPrint(args []string) error {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, `  gochain createwallet                     generate a new wallet/address`)
+	fmt.Fprintln(os.Stderr, `  gochain listaddresses                    list wallet addresses`)
 	fmt.Fprintln(os.Stderr, `  gochain createblockchain -address X      create a chain (genesis reward to X)`)
 	fmt.Fprintln(os.Stderr, `  gochain getbalance -address X            print X's balance`)
 	fmt.Fprintln(os.Stderr, `  gochain send -from A -to B -amount N      transfer N from A to B`)
