@@ -383,3 +383,122 @@ func isSpent(spent map[string][]int, txID string, outIdx int) bool {
 	}
 	return false
 }
+
+// --- Phase 7: networking support (block replication) ---
+
+var (
+	ErrInvalidBlock  = errors.New("invalid block: failed proof of work")
+	ErrBlockNotFound = errors.New("block not found")
+)
+
+// OpenOrInit opens the chain at dbPath, or returns an empty chain (ready to
+// receive blocks from a peer) when none exists yet.
+func OpenOrInit(dbPath string) (*Blockchain, error) {
+	db, err := bbolt.Open(dbPath, 0600, nil)
+	if err != nil {
+		return nil, err
+	}
+	var tip []byte
+	err = db.View(func(t *bbolt.Tx) error {
+		if b := t.Bucket([]byte(blocksBucket)); b != nil {
+			tip = append([]byte{}, b.Get([]byte(tipKey))...)
+		}
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Blockchain{db: db, tip: tip}, nil
+}
+
+// GetBlockHashes returns every block hash from genesis to the tip, in order.
+func (bc *Blockchain) GetBlockHashes() ([][]byte, error) {
+	var hashes [][]byte
+	it := bc.Iterator()
+	for {
+		b, err := it.Next()
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
+		hashes = append(hashes, b.Hash)
+	}
+	for i, j := 0, len(hashes)-1; i < j; i, j = i+1, j-1 {
+		hashes[i], hashes[j] = hashes[j], hashes[i]
+	}
+	return hashes, nil
+}
+
+// GetBlock reads a single block by hash.
+func (bc *Blockchain) GetBlock(hash []byte) (*block.Block, error) {
+	var b *block.Block
+	err := bc.db.View(func(t *bbolt.Tx) error {
+		bkt := t.Bucket([]byte(blocksBucket))
+		if bkt == nil {
+			return ErrBlockNotFound
+		}
+		encoded := bkt.Get(hash)
+		if encoded == nil {
+			return ErrBlockNotFound
+		}
+		var derr error
+		b, derr = block.Deserialize(encoded)
+		return derr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// HasBlock reports whether the chain already stores a block with this hash.
+func (bc *Blockchain) HasBlock(hash []byte) (bool, error) {
+	has := false
+	err := bc.db.View(func(t *bbolt.Tx) error {
+		if bkt := t.Bucket([]byte(blocksBucket)); bkt != nil && bkt.Get(hash) != nil {
+			has = true
+		}
+		return nil
+	})
+	return has, err
+}
+
+// AddReceivedBlock validates a block received from a peer and stores it,
+// advancing the tip when the block extends the current chain.
+func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
+	if !pow.New(b).Validate() {
+		return ErrInvalidBlock
+	}
+	extendsTip := len(bc.tip) == 0 || bytes.Equal(b.PrevBlockHash, bc.tip)
+
+	err := bc.db.Update(func(t *bbolt.Tx) error {
+		bkt, err := t.CreateBucketIfNotExists([]byte(blocksBucket))
+		if err != nil {
+			return err
+		}
+		if bkt.Get(b.Hash) != nil {
+			return nil // already stored
+		}
+		ser, err := b.Serialize()
+		if err != nil {
+			return err
+		}
+		if err := bkt.Put(b.Hash, ser); err != nil {
+			return err
+		}
+		if extendsTip {
+			return bkt.Put([]byte(tipKey), b.Hash)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if extendsTip {
+		bc.tip = b.Hash
+	}
+	return nil
+}
