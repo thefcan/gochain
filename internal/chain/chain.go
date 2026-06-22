@@ -44,7 +44,7 @@ func CreateBlockchain(dbPath, address string) (*Blockchain, error) {
 	}
 	coinbase, err := tx.NewCoinbaseTX(address, "")
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	genesis := block.New([]*tx.Transaction{coinbase}, []byte{})
@@ -68,7 +68,7 @@ func CreateBlockchain(dbPath, address string) (*Blockchain, error) {
 		return bkt.Put([]byte(tipKey), genesis.Hash)
 	})
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Blockchain{db: db, tip: genesis.Hash}, nil
@@ -90,7 +90,7 @@ func Open(dbPath string) (*Blockchain, error) {
 		return nil
 	})
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Blockchain{db: db, tip: tip}, nil
@@ -406,7 +406,7 @@ func OpenOrInit(dbPath string) (*Blockchain, error) {
 		return nil
 	})
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Blockchain{db: db, tip: tip}, nil
