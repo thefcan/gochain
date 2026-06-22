@@ -8,30 +8,34 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"math/big"
 
+	//nolint:staticcheck // RIPEMD-160 is part of the Bitcoin address spec; required, not a free choice.
 	"golang.org/x/crypto/ripemd160"
 )
 
 const (
 	version         = byte(0x00)
 	addrChecksumLen = 4
-	fieldSize       = 32 // P-256 coordinate width in bytes
 )
 
-// Wallet is an ECDSA key pair. PublicKey is the raw X||Y coordinates (64 bytes).
+// Wallet is an ECDSA (P-256) key pair. PublicKey is the uncompressed SEC1
+// encoding (0x04 || X || Y).
 type Wallet struct {
 	PrivateKey ecdsa.PrivateKey
 	PublicKey  []byte
 }
 
-// NewWallet generates a fresh ECDSA (P-256) wallet.
+// NewWallet generates a fresh ECDSA wallet.
 func NewWallet() (*Wallet, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	return &Wallet{PrivateKey: *priv, PublicKey: marshalPub(priv.PublicKey.X, priv.PublicKey.Y)}, nil
+	pub, err := priv.PublicKey.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{PrivateKey: *priv, PublicKey: pub}, nil
 }
 
 // Address returns the wallet's Base58Check address.
@@ -65,12 +69,4 @@ func checksum(payload []byte) []byte {
 	first := sha256.Sum256(payload)
 	second := sha256.Sum256(first[:])
 	return second[:addrChecksumLen]
-}
-
-// marshalPub encodes X and Y as fixed-width 32-byte big-endian halves.
-func marshalPub(x, y *big.Int) []byte {
-	pub := make([]byte, 2*fieldSize)
-	x.FillBytes(pub[:fieldSize])
-	y.FillBytes(pub[fieldSize:])
-	return pub
 }

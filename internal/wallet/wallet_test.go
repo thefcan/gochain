@@ -10,8 +10,8 @@ func TestNewWalletAddressIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWallet: %v", err)
 	}
-	if got := len(w.PublicKey); got != 2*fieldSize {
-		t.Errorf("PublicKey length = %d, want %d", got, 2*fieldSize)
+	if got := len(w.PublicKey); got != 65 {
+		t.Errorf("PublicKey length = %d, want 65 (uncompressed P-256)", got)
 	}
 	if !ValidateAddress(w.Address()) {
 		t.Errorf("generated address %q failed validation", w.Address())

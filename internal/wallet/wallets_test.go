@@ -31,8 +31,10 @@ func TestWalletsSaveAndLoad(t *testing.T) {
 	if w.Address() != addr {
 		t.Errorf("reconstructed address = %q, want %q", w.Address(), addr)
 	}
-	if w.PrivateKey.D == nil || w.PrivateKey.D.Sign() == 0 {
-		t.Error("private key was not restored")
+	// The private key must round-trip (modern API, not the deprecated D field).
+	raw, err := w.PrivateKey.Bytes()
+	if err != nil || len(raw) == 0 {
+		t.Errorf("private key was not restored: %v", err)
 	}
 }
 

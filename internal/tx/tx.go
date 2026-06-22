@@ -20,7 +20,7 @@ import (
 const (
 	subsidy = 10 // mining reward
 	sigLen  = 64 // ECDSA P-256 signature: r||s, 32 bytes each
-	keyLen  = 64 // public key: X||Y, 32 bytes each
+	keyLen  = 65 // uncompressed SEC1 public key: 0x04 || X || Y
 )
 
 // ErrPrevTxNotFound is returned when an input references an unknown transaction.
@@ -31,7 +31,7 @@ type TXInput struct {
 	Txid      []byte // referenced transaction ID
 	Vout      int    // referenced output index
 	Signature []byte // r||s over the spend
-	PubKey    []byte // spender's raw public key (X||Y)
+	PubKey    []byte // spender's uncompressed public key
 }
 
 // TXOutput holds coins locked to a public-key hash.
@@ -162,7 +162,6 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) (bool, error) {
 	}
 
 	txCopy := tx.TrimmedCopy()
-	curve := elliptic.P256()
 	for inID, vin := range tx.Vin {
 		prevTX := prevTXs[hex.EncodeToString(vin.Txid)]
 		if vin.Vout >= len(prevTX.Vout) {
@@ -182,11 +181,11 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) (bool, error) {
 		}
 		r := new(big.Int).SetBytes(vin.Signature[:sigLen/2])
 		s := new(big.Int).SetBytes(vin.Signature[sigLen/2:])
-		x := new(big.Int).SetBytes(vin.PubKey[:keyLen/2])
-		y := new(big.Int).SetBytes(vin.PubKey[keyLen/2:])
-		pub := ecdsa.PublicKey{Curve: curve, X: x, Y: y}
-
-		if !ecdsa.Verify(&pub, dataToVerify, r, s) {
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), vin.PubKey)
+		if err != nil {
+			return false, nil
+		}
+		if !ecdsa.Verify(pub, dataToVerify, r, s) {
 			return false, nil
 		}
 	}

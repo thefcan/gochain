@@ -6,7 +6,6 @@ import (
 	"crypto/elliptic"
 	"encoding/gob"
 	"errors"
-	"math/big"
 	"os"
 	"sort"
 )
@@ -33,7 +32,11 @@ func LoadWallets(file string) (*Wallets, error) {
 		return nil, err
 	}
 	for addr, wd := range stored {
-		ws.wallets[addr] = wd.toWallet()
+		w, err := wd.toWallet()
+		if err != nil {
+			return nil, err
+		}
+		ws.wallets[addr] = w
 	}
 	return ws, nil
 }
@@ -42,7 +45,11 @@ func LoadWallets(file string) (*Wallets, error) {
 func (ws *Wallets) Save(file string) error {
 	stored := make(map[string]walletData, len(ws.wallets))
 	for addr, w := range ws.wallets {
-		stored[addr] = walletData{D: w.PrivateKey.D.Bytes(), PublicKey: w.PublicKey}
+		raw, err := w.PrivateKey.Bytes()
+		if err != nil {
+			return err
+		}
+		stored[addr] = walletData{Priv: raw}
 	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(stored); err != nil {
@@ -78,17 +85,20 @@ func (ws *Wallets) GetWallet(address string) (*Wallet, bool) {
 	return w, ok
 }
 
-// walletData is the gob-friendly on-disk form of a wallet (no curve interface).
+// walletData is the gob-friendly on-disk form: just the raw private key, from
+// which the public key and address are reconstructed.
 type walletData struct {
-	D         []byte
-	PublicKey []byte
+	Priv []byte
 }
 
-func (wd walletData) toWallet() *Wallet {
-	var priv ecdsa.PrivateKey
-	priv.Curve = elliptic.P256()
-	priv.D = new(big.Int).SetBytes(wd.D)
-	priv.PublicKey.X = new(big.Int).SetBytes(wd.PublicKey[:fieldSize])
-	priv.PublicKey.Y = new(big.Int).SetBytes(wd.PublicKey[fieldSize:])
-	return &Wallet{PrivateKey: priv, PublicKey: wd.PublicKey}
+func (wd walletData) toWallet() (*Wallet, error) {
+	priv, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), wd.Priv)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := priv.PublicKey.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	return &Wallet{PrivateKey: *priv, PublicKey: pub}, nil
 }
