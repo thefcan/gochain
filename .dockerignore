@@ -1,0 +1,12 @@
+.git
+.github
+.claude
+.golangci.yml
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+*.md
+*.db
+*.dat
+*.tar

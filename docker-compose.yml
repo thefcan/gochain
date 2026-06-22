@@ -1,0 +1,13 @@
+services:
+  node:
+    build: .
+    command: ["startnode", "-port", "3000"]
+    environment:
+      GOCHAIN_DB: /data/gochain.db
+    ports:
+      - "3000:3000"
+    volumes:
+      - chaindata:/data
+
+volumes:
+  chaindata:

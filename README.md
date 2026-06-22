@@ -1,9 +1,9 @@
 # gochain
 
 A blockchain written from scratch in **Go** — proof of work, persistence, a
-signed UTXO transaction model, ECDSA wallets and **peer-to-peer networking**.
-Built incrementally, with tests, CI and Docker, to the engineering standard of a
-production service.
+signed UTXO transaction model, ECDSA wallets and peer-to-peer networking. Built
+with tests, linting, Docker and CI, to the engineering standard of a production
+service.
 
 ## Why Go?
 Go is the dominant language of blockchain **infrastructure** — go-ethereum (geth),
@@ -32,6 +32,7 @@ gochain/
     └── network/      # TCP peer-to-peer block replication
 ```
 Clean, acyclic dependencies: `wallet`/`tx` → `block` → `pow` → `chain` → `network`.
+Wallet keys use the modern `crypto/ecdsa` encoding APIs (Go 1.25+).
 
 ## What it does
 - **Proof of Work**: every block is mined to a difficulty target; tampering breaks it.
@@ -52,15 +53,23 @@ B=$(./gochain createwallet | awk '{print $NF}')
 ./gochain getbalance -address "$A"                # 6 (change)
 
 # Peer-to-peer: serve on one node, sync from another
-./gochain startnode -port 3000                    # node A serves its chain
-GOCHAIN_DB=node-b.db ./gochain sync -peer localhost:3000   # node B replicates it
+./gochain startnode -port 3000
+GOCHAIN_DB=node-b.db ./gochain sync -peer localhost:3000
 ```
-Storage paths are configurable via `GOCHAIN_DB` and `GOCHAIN_WALLET`.
 
-## Tests & benchmark
+## Docker
+A multi-stage build produces a tiny (~12 MB) distroless, non-root image:
+```bash
+docker build -t gochain .
+docker run --rm -e GOCHAIN_WALLET=/tmp/w.dat gochain createwallet
+
+# or run a node with docker-compose (chain stored in a named volume)
+docker compose up --build
+```
+
+## Tests, lint & benchmark
 ```bash
 go test -race ./...                            # unit, crypto, signing, persistence, P2P
+golangci-lint run ./...                        # static analysis (config: .golangci.yml)
 go test -bench=Run -benchmem ./internal/pow    # mining benchmark
 ```
-The suite covers proof of work, the UTXO model, ECDSA sign/verify (including
-forgery and tamper rejection), persistence across restarts, and TCP block sync.
