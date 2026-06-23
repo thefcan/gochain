@@ -1,5 +1,7 @@
 # gochain
 
+![CI](https://github.com/thefcan/gochain/actions/workflows/ci.yml/badge.svg)
+
 A blockchain written from scratch in **Go** — proof of work, persistence, a
 signed UTXO transaction model, ECDSA wallets and peer-to-peer networking. Built
 with tests, linting, Docker and CI, to the engineering standard of a production
