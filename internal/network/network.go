@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 
 	"github.com/thefcan/gochain/internal/block"
 	"github.com/thefcan/gochain/internal/chain"
@@ -27,6 +28,24 @@ type message struct {
 	Hashes  [][]byte
 	Hash    []byte
 	Block   []byte
+}
+
+// maxMessageBytes caps how many bytes we read for a single peer message, so a
+// hostile peer cannot make the gob decoder allocate unbounded memory by
+// declaring a huge length. It is a var (not a const) only so tests can shrink
+// it; treat it as constant at runtime.
+var maxMessageBytes int64 = 16 << 20 // 16 MiB
+
+// ioTimeout bounds a single peer exchange, so a slow or silent peer cannot pin
+// a goroutine and its connection open forever.
+const ioTimeout = 30 * time.Second
+
+// decodeMessage reads exactly one gob-encoded message from r, refusing to read
+// past maxMessageBytes.
+func decodeMessage(r io.Reader) (message, error) {
+	var m message
+	err := gob.NewDecoder(io.LimitReader(r, maxMessageBytes)).Decode(&m)
+	return m, err
 }
 
 // Node serves a blockchain to peers and can sync from them.
@@ -60,9 +79,10 @@ func (n *Node) serve(ln net.Listener) {
 
 func (n *Node) handle(conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
 
-	var msg message
-	if err := gob.NewDecoder(conn).Decode(&msg); err != nil {
+	msg, err := decodeMessage(conn)
+	if err != nil {
 		if !errors.Is(err, io.EOF) {
 			log.Printf("network: decode request: %v", err)
 		}
@@ -132,16 +152,17 @@ func (n *Node) SyncFrom(peerAddr string) (int, error) {
 
 // request opens a connection to peerAddr, sends req and returns the response.
 func request(peerAddr string, req message) (message, error) {
-	conn, err := net.Dial("tcp", peerAddr)
+	conn, err := net.DialTimeout("tcp", peerAddr, ioTimeout)
 	if err != nil {
 		return message{}, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(ioTimeout))
 	if err := gob.NewEncoder(conn).Encode(req); err != nil {
 		return message{}, err
 	}
-	var resp message
-	if err := gob.NewDecoder(conn).Decode(&resp); err != nil {
+	resp, err := decodeMessage(conn)
+	if err != nil {
 		return message{}, err
 	}
 	return resp, nil

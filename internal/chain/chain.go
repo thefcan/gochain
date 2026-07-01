@@ -472,6 +472,19 @@ func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
 	if !pow.New(b).Validate() {
 		return ErrInvalidBlock
 	}
+	// A valid proof of work is cheap at this difficulty, so it must not be
+	// trusted on its own: verify every transaction against the outputs already
+	// in the chain, so a peer cannot inject a block that spends coins it does
+	// not own or that carries a forged signature.
+	for _, t := range b.Transactions {
+		ok, err := bc.VerifyTransaction(t)
+		if err != nil {
+			return fmt.Errorf("received block: verify tx %x: %w", t.ID, err)
+		}
+		if !ok {
+			return ErrInvalidTransaction
+		}
+	}
 	extendsTip := len(bc.tip) == 0 || bytes.Equal(b.PrevBlockHash, bc.tip)
 
 	err := bc.db.Update(func(t *bbolt.Tx) error {

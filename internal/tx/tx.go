@@ -23,8 +23,11 @@ const (
 	keyLen  = 65 // uncompressed SEC1 public key: 0x04 || X || Y
 )
 
-// ErrPrevTxNotFound is returned when an input references an unknown transaction.
-var ErrPrevTxNotFound = errors.New("previous transaction not found")
+// Errors returned when a transaction references outputs that cannot be resolved.
+var (
+	ErrPrevTxNotFound     = errors.New("previous transaction not found")
+	ErrInvalidOutputIndex = errors.New("input references a non-existent output index")
+)
 
 // TXInput spends an output of a previous transaction.
 type TXInput struct {
@@ -129,6 +132,9 @@ func (tx *Transaction) Sign(priv ecdsa.PrivateKey, prevTXs map[string]Transactio
 	txCopy := tx.TrimmedCopy()
 	for inID, vin := range txCopy.Vin {
 		prevTX := prevTXs[hex.EncodeToString(vin.Txid)]
+		if vin.Vout < 0 || vin.Vout >= len(prevTX.Vout) {
+			return ErrInvalidOutputIndex
+		}
 		txCopy.Vin[inID].Signature = nil
 		txCopy.Vin[inID].PubKey = prevTX.Vout[vin.Vout].PubKeyHash
 
@@ -164,7 +170,7 @@ func (tx *Transaction) Verify(prevTXs map[string]Transaction) (bool, error) {
 	txCopy := tx.TrimmedCopy()
 	for inID, vin := range tx.Vin {
 		prevTX := prevTXs[hex.EncodeToString(vin.Txid)]
-		if vin.Vout >= len(prevTX.Vout) {
+		if vin.Vout < 0 || vin.Vout >= len(prevTX.Vout) {
 			return false, nil
 		}
 		txCopy.Vin[inID].Signature = nil
