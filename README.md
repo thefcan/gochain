@@ -37,8 +37,10 @@ Wallet keys use the modern `crypto/ecdsa` encoding APIs (Go 1.25+).
 - **Cryptographic security**: outputs are locked to a public-key hash; spending
   requires an **ECDSA signature** verified before mining (forgeries rejected).
 - **Persistence**: the chain is stored in an embedded **BoltDB** file.
-- **P2P sync**: a fresh node downloads a peer's chain over **TCP** and validates
-  every block — proof of work **and** transaction signatures — before storing it.
+- **P2P sync & fork choice**: a fresh node downloads a peer's chain over **TCP**,
+  fully validates every block (proof of work, signatures, coinbase rules, no
+  double-spend, value conservation), and follows the **longest valid chain**,
+  reorganising onto a peer's branch when it grows longer.
 
 ## CLI
 ```bash
@@ -95,7 +97,7 @@ issues below, each now guarded by a regression test:
 | P2P decode | Unbounded `gob` decode of peer input allowed a memory-exhaustion (OOM) DoS | 16 MiB read cap via `io.LimitReader` |
 | P2P I/O | No socket deadlines — a silent peer could pin a goroutine indefinitely | Per-exchange read/write deadlines + dial timeout |
 | Transactions | An input's output index was used without a lower-bound check → panic on a crafted negative index | Full bounds check; the transaction is rejected cleanly |
-| Consensus | Received blocks were trusted on valid proof of work **alone** — cheap at this difficulty, so forged transactions could be injected | Every transaction in a received block is signature-verified against the chain before storage |
+| Consensus | Received blocks were trusted on valid proof of work **alone** — cheap at this difficulty, so forged transactions could be injected | Received blocks are fully validated on their own branch (signatures, coinbase rules, no double-spend, value conservation); the node then follows the longest valid chain (fork choice) |
 
 ### Running the checks
 ```bash
