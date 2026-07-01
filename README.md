@@ -3,6 +3,7 @@
 [![CI](https://github.com/thefcan/gochain/actions/workflows/ci.yml/badge.svg)](https://github.com/thefcan/gochain/actions/workflows/ci.yml)
 ![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)
 ![tests](https://img.shields.io/badge/tests-race%2C%20property%2C%20fuzz-4c1)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 *A blockchain written from scratch in **Go** — proof of work, persistence, a
 signed UTXO transaction model, ECDSA wallets and TCP peer-to-peer sync.*
@@ -14,15 +15,6 @@ fuzz tests, a security-reviewed network layer, static analysis, Docker and CI.
 Go is the dominant language of blockchain **infrastructure** — go-ethereum (geth),
 the Cosmos SDK / Tendermint and Hyperledger Fabric are all written in Go — so this
 implementation maps directly to the work blockchain teams actually do.
-
-## Status — all phases complete
-- [x] **Phase 1 — Blocks & in-memory chain** (SHA-256 linking)
-- [x] **Phase 2 — Proof of Work** (Hashcash mining, difficulty, validation)
-- [x] **Phase 3 — Persistence (BoltDB) + CLI**
-- [x] **Phase 4 — UTXO transactions** (coinbase, transfers with change, balances)
-- [x] **Phase 5 — Wallets & addresses** (ECDSA + Base58Check)
-- [x] **Phase 6 — Signed transactions** (ECDSA sign/verify, tamper-rejecting)
-- [x] **Phase 7 — Peer-to-peer network** (TCP block sync between nodes)
 
 ## Architecture
 ```
@@ -113,3 +105,7 @@ go test -run '^$' -fuzz FuzzDeserializeBlock -fuzztime 30s ./internal/block/
 go test -run '^$' -fuzz FuzzDecodeMessage    -fuzztime 30s ./internal/network/
 go test -bench=Run -benchmem ./internal/pow                 # mining benchmark
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 Furkan Karafil
