@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	subsidy = 10 // mining reward
+	Subsidy = 10 // coinbase (mining reward) value
 	sigLen  = 64 // ECDSA P-256 signature: r||s, 32 bytes each
 	keyLen  = 65 // uncompressed SEC1 public key: 0x04 || X || Y
 )
@@ -88,7 +88,7 @@ func (tx *Transaction) Hash() ([]byte, error) {
 
 // NewCoinbaseTX creates a coinbase transaction paying the subsidy to `to`.
 func NewCoinbaseTX(to, data string) (*Transaction, error) {
-	out, err := NewTXOutput(subsidy, to)
+	out, err := NewTXOutput(Subsidy, to)
 	if err != nil {
 		return nil, err
 	}

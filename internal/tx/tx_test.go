@@ -25,7 +25,7 @@ func TestCoinbaseLockedToRecipient(t *testing.T) {
 // spendFrom builds an unsigned tx where `owner` spends prev's output #0.
 func spendFrom(t *testing.T, prev *Transaction, owner *wallet.Wallet, to string) *Transaction {
 	t.Helper()
-	out, err := NewTXOutput(subsidy, to)
+	out, err := NewTXOutput(Subsidy, to)
 	if err != nil {
 		t.Fatalf("NewTXOutput: %v", err)
 	}

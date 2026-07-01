@@ -387,8 +387,10 @@ func isSpent(spent map[string][]int, txID string, outIdx int) bool {
 // --- Phase 7: networking support (block replication) ---
 
 var (
-	ErrInvalidBlock  = errors.New("invalid block: failed proof of work")
-	ErrBlockNotFound = errors.New("block not found")
+	ErrInvalidBlock    = errors.New("invalid block: failed proof of work")
+	ErrBlockNotFound   = errors.New("block not found")
+	ErrDoubleSpend     = errors.New("invalid block: transaction spends an already-spent output")
+	ErrInvalidCoinbase = errors.New("invalid block: illegal coinbase transaction")
 )
 
 // OpenOrInit opens the chain at dbPath, or returns an empty chain (ready to
@@ -473,17 +475,10 @@ func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
 		return ErrInvalidBlock
 	}
 	// A valid proof of work is cheap at this difficulty, so it must not be
-	// trusted on its own: verify every transaction against the outputs already
-	// in the chain, so a peer cannot inject a block that spends coins it does
-	// not own or that carries a forged signature.
-	for _, t := range b.Transactions {
-		ok, err := bc.VerifyTransaction(t)
-		if err != nil {
-			return fmt.Errorf("received block: verify tx %x: %w", t.ID, err)
-		}
-		if !ok {
-			return ErrInvalidTransaction
-		}
+	// trusted on its own: enforce the consensus rules on the block's
+	// transactions before storing it.
+	if err := bc.validateBlockTransactions(b); err != nil {
+		return err
 	}
 	extendsTip := len(bc.tip) == 0 || bytes.Equal(b.PrevBlockHash, bc.tip)
 
@@ -512,6 +507,102 @@ func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
 	}
 	if extendsTip {
 		bc.tip = b.Hash
+	}
+	return nil
+}
+
+// outpointKey identifies a specific transaction output as "txid:index".
+func outpointKey(txid []byte, vout int) string {
+	return fmt.Sprintf("%x:%d", txid, vout)
+}
+
+// spentOutpoints returns the set of outputs already spent by the current chain.
+func (bc *Blockchain) spentOutpoints() (map[string]struct{}, error) {
+	spent := make(map[string]struct{})
+	it := bc.Iterator()
+	for {
+		b, err := it.Next()
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
+		for _, t := range b.Transactions {
+			if t.IsCoinbase() {
+				continue
+			}
+			for _, in := range t.Vin {
+				spent[outpointKey(in.Txid, in.Vout)] = struct{}{}
+			}
+		}
+	}
+	return spent, nil
+}
+
+// validateBlockTransactions enforces the consensus rules on a block received
+// from a peer before it is stored: valid signatures, no output spent twice
+// (against the chain or within the same block), outputs that never exceed the
+// inputs they spend, and a coinbase only in the genesis block paying exactly the
+// subsidy. A valid proof of work alone is never enough to trust a block.
+func (bc *Blockchain) validateBlockTransactions(b *block.Block) error {
+	spent, err := bc.spentOutpoints()
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{})
+	coinbases := 0
+
+	for _, t := range b.Transactions {
+		if t.IsCoinbase() {
+			coinbases++
+			if len(t.Vout) != 1 || t.Vout[0].Value != tx.Subsidy {
+				return ErrInvalidCoinbase
+			}
+			continue
+		}
+
+		ok, err := bc.VerifyTransaction(t)
+		if err != nil {
+			return fmt.Errorf("received block: verify tx %x: %w", t.ID, err)
+		}
+		if !ok {
+			return ErrInvalidTransaction
+		}
+
+		inputSum := 0
+		for _, in := range t.Vin {
+			key := outpointKey(in.Txid, in.Vout)
+			if _, dup := spent[key]; dup {
+				return ErrDoubleSpend
+			}
+			if _, dup := seen[key]; dup {
+				return ErrDoubleSpend
+			}
+			prevTX, err := bc.FindTransaction(in.Txid)
+			if err != nil {
+				return fmt.Errorf("received block: resolve input %x: %w", in.Txid, err)
+			}
+			if in.Vout < 0 || in.Vout >= len(prevTX.Vout) {
+				return ErrInvalidTransaction
+			}
+			inputSum += prevTX.Vout[in.Vout].Value
+			seen[key] = struct{}{}
+		}
+
+		outputSum := 0
+		for _, out := range t.Vout {
+			outputSum += out.Value
+		}
+		if outputSum > inputSum {
+			return ErrInvalidTransaction
+		}
+	}
+
+	// A coinbase mints new coins, so it is only legitimate in the genesis
+	// block — i.e. while the local chain is still empty.
+	if coinbases > 1 || (coinbases == 1 && len(bc.tip) != 0) {
+		return ErrInvalidCoinbase
 	}
 	return nil
 }
