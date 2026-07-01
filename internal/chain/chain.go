@@ -146,7 +146,13 @@ type Iterator struct {
 }
 
 func (bc *Blockchain) Iterator() *Iterator {
-	return &Iterator{db: bc.db, currentHash: bc.tip}
+	return bc.iteratorFrom(bc.tip)
+}
+
+// iteratorFrom walks the chain from an arbitrary block hash back to genesis,
+// which lets us inspect a side branch (not just the active tip) for fork choice.
+func (bc *Blockchain) iteratorFrom(start []byte) *Iterator {
+	return &Iterator{db: bc.db, currentHash: start}
 }
 
 func (it *Iterator) Next() (*block.Block, error) {
@@ -268,9 +274,15 @@ Work:
 	return accumulated, unspent, nil
 }
 
-// FindTransaction looks up a transaction by ID across the whole chain.
+// FindTransaction looks up a transaction by ID along the active chain.
 func (bc *Blockchain) FindTransaction(id []byte) (tx.Transaction, error) {
-	it := bc.Iterator()
+	return bc.findTransactionFrom(bc.tip, id)
+}
+
+// findTransactionFrom looks up a transaction by ID along the branch ending at
+// start, so a block on a side branch is validated against its own history.
+func (bc *Blockchain) findTransactionFrom(start, id []byte) (tx.Transaction, error) {
+	it := bc.iteratorFrom(start)
 	for {
 		b, err := it.Next()
 		if err != nil {
@@ -289,9 +301,13 @@ func (bc *Blockchain) FindTransaction(id []byte) (tx.Transaction, error) {
 }
 
 func (bc *Blockchain) gatherPrevTXs(t *tx.Transaction) (map[string]tx.Transaction, error) {
+	return bc.gatherPrevTXsFrom(bc.tip, t)
+}
+
+func (bc *Blockchain) gatherPrevTXsFrom(start []byte, t *tx.Transaction) (map[string]tx.Transaction, error) {
 	prevTXs := make(map[string]tx.Transaction)
 	for _, vin := range t.Vin {
-		prevTX, err := bc.FindTransaction(vin.Txid)
+		prevTX, err := bc.findTransactionFrom(start, vin.Txid)
 		if err != nil {
 			return nil, err
 		}
@@ -309,12 +325,18 @@ func (bc *Blockchain) SignTransaction(t *tx.Transaction, priv ecdsa.PrivateKey) 
 	return t.Sign(priv, prevTXs)
 }
 
-// VerifyTransaction verifies t's signatures against the referenced outputs.
+// VerifyTransaction verifies t's signatures against outputs on the active chain.
 func (bc *Blockchain) VerifyTransaction(t *tx.Transaction) (bool, error) {
+	return bc.verifyTransactionOn(bc.tip, t)
+}
+
+// verifyTransactionOn verifies t's signatures against the outputs on the branch
+// ending at start.
+func (bc *Blockchain) verifyTransactionOn(start []byte, t *tx.Transaction) (bool, error) {
 	if t.IsCoinbase() {
 		return true, nil
 	}
-	prevTXs, err := bc.gatherPrevTXs(t)
+	prevTXs, err := bc.gatherPrevTXsFrom(start, t)
 	if err != nil {
 		return false, err
 	}
@@ -391,6 +413,7 @@ var (
 	ErrBlockNotFound   = errors.New("block not found")
 	ErrDoubleSpend     = errors.New("invalid block: transaction spends an already-spent output")
 	ErrInvalidCoinbase = errors.New("invalid block: illegal coinbase transaction")
+	ErrOrphanBlock     = errors.New("orphan block: its parent is not known")
 )
 
 // OpenOrInit opens the chain at dbPath, or returns an empty chain (ready to
@@ -468,20 +491,33 @@ func (bc *Blockchain) HasBlock(hash []byte) (bool, error) {
 	return has, err
 }
 
-// AddReceivedBlock validates a block received from a peer and stores it,
-// advancing the tip when the block extends the current chain.
+// AddReceivedBlock validates a block received from a peer, stores it, and adopts
+// its branch as the active chain when that branch is longer than the current one
+// (longest-chain fork choice). A non-genesis block whose parent is unknown is
+// rejected as an orphan — peers must send blocks parent-first, as SyncFrom does.
 func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
 	if !pow.New(b).Validate() {
 		return ErrInvalidBlock
 	}
+	// The parent must already be known so the block can be validated against —
+	// and its height measured along — its own branch.
+	if len(b.PrevBlockHash) != 0 {
+		has, err := bc.HasBlock(b.PrevBlockHash)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return ErrOrphanBlock
+		}
+	}
 	// A valid proof of work is cheap at this difficulty, so it must not be
 	// trusted on its own: enforce the consensus rules on the block's
-	// transactions before storing it.
-	if err := bc.validateBlockTransactions(b); err != nil {
+	// transactions, evaluated against its parent branch, before storing it.
+	if err := bc.validateBlockTransactions(b, b.PrevBlockHash); err != nil {
 		return err
 	}
-	extendsTip := len(bc.tip) == 0 || bytes.Equal(b.PrevBlockHash, bc.tip)
 
+	stored := false
 	err := bc.db.Update(func(t *bbolt.Tx) error {
 		bkt, err := t.CreateBucketIfNotExists([]byte(blocksBucket))
 		if err != nil {
@@ -494,21 +530,61 @@ func (bc *Blockchain) AddReceivedBlock(b *block.Block) error {
 		if err != nil {
 			return err
 		}
-		if err := bkt.Put(b.Hash, ser); err != nil {
-			return err
-		}
-		if extendsTip {
-			return bkt.Put([]byte(tipKey), b.Hash)
-		}
-		return nil
+		stored = true
+		return bkt.Put(b.Hash, ser)
 	})
 	if err != nil {
 		return err
 	}
-	if extendsTip {
+	if !stored {
+		return nil // already had this block; nothing to re-evaluate
+	}
+
+	// Fork choice: adopt this branch only if it is strictly longer than the
+	// active chain. Because every balance/UTXO query re-walks from the tip,
+	// moving the tip pointer is all a reorg needs.
+	newHeight, err := bc.heightOf(b.Hash)
+	if err != nil {
+		return err
+	}
+	curHeight := 0
+	if len(bc.tip) != 0 {
+		if curHeight, err = bc.heightOf(bc.tip); err != nil {
+			return err
+		}
+	}
+	if len(bc.tip) == 0 || newHeight > curHeight {
+		if err := bc.setTip(b.Hash); err != nil {
+			return err
+		}
 		bc.tip = b.Hash
 	}
 	return nil
+}
+
+// heightOf returns the number of blocks from hash back to genesis (inclusive).
+func (bc *Blockchain) heightOf(hash []byte) (int, error) {
+	height := 0
+	for len(hash) != 0 {
+		b, err := bc.GetBlock(hash)
+		if err != nil {
+			return 0, err
+		}
+		height++
+		hash = b.PrevBlockHash
+	}
+	return height, nil
+}
+
+// setTip persists a new active-chain tip pointer.
+func (bc *Blockchain) setTip(hash []byte) error {
+	return bc.db.Update(func(t *bbolt.Tx) error {
+		bkt := t.Bucket([]byte(blocksBucket))
+		if bkt == nil {
+			return ErrNoChain
+		}
+		return bkt.Put([]byte(tipKey), hash)
+	})
 }
 
 // outpointKey identifies a specific transaction output as "txid:index".
@@ -516,10 +592,11 @@ func outpointKey(txid []byte, vout int) string {
 	return fmt.Sprintf("%x:%d", txid, vout)
 }
 
-// spentOutpoints returns the set of outputs already spent by the current chain.
-func (bc *Blockchain) spentOutpoints() (map[string]struct{}, error) {
+// spentOutpointsFrom returns the set of outputs already spent by the branch
+// ending at start.
+func (bc *Blockchain) spentOutpointsFrom(start []byte) (map[string]struct{}, error) {
 	spent := make(map[string]struct{})
-	it := bc.Iterator()
+	it := bc.iteratorFrom(start)
 	for {
 		b, err := it.Next()
 		if err != nil {
@@ -540,13 +617,14 @@ func (bc *Blockchain) spentOutpoints() (map[string]struct{}, error) {
 	return spent, nil
 }
 
-// validateBlockTransactions enforces the consensus rules on a block received
-// from a peer before it is stored: valid signatures, no output spent twice
-// (against the chain or within the same block), outputs that never exceed the
-// inputs they spend, and a coinbase only in the genesis block paying exactly the
-// subsidy. A valid proof of work alone is never enough to trust a block.
-func (bc *Blockchain) validateBlockTransactions(b *block.Block) error {
-	spent, err := bc.spentOutpoints()
+// validateBlockTransactions enforces the consensus rules on a received block
+// before it is stored, evaluated against the branch ending at parent: valid
+// signatures, no output spent twice (along that branch or within the same
+// block), outputs that never exceed the inputs they spend, and a coinbase only
+// in the genesis block paying exactly the subsidy. A valid proof of work alone
+// is never enough to trust a block.
+func (bc *Blockchain) validateBlockTransactions(b *block.Block, parent []byte) error {
+	spent, err := bc.spentOutpointsFrom(parent)
 	if err != nil {
 		return err
 	}
@@ -562,7 +640,7 @@ func (bc *Blockchain) validateBlockTransactions(b *block.Block) error {
 			continue
 		}
 
-		ok, err := bc.VerifyTransaction(t)
+		ok, err := bc.verifyTransactionOn(parent, t)
 		if err != nil {
 			return fmt.Errorf("received block: verify tx %x: %w", t.ID, err)
 		}
@@ -579,7 +657,7 @@ func (bc *Blockchain) validateBlockTransactions(b *block.Block) error {
 			if _, dup := seen[key]; dup {
 				return ErrDoubleSpend
 			}
-			prevTX, err := bc.FindTransaction(in.Txid)
+			prevTX, err := bc.findTransactionFrom(parent, in.Txid)
 			if err != nil {
 				return fmt.Errorf("received block: resolve input %x: %w", in.Txid, err)
 			}
@@ -600,8 +678,8 @@ func (bc *Blockchain) validateBlockTransactions(b *block.Block) error {
 	}
 
 	// A coinbase mints new coins, so it is only legitimate in the genesis
-	// block — i.e. while the local chain is still empty.
-	if coinbases > 1 || (coinbases == 1 && len(bc.tip) != 0) {
+	// block — the one block with no parent.
+	if coinbases > 1 || (coinbases == 1 && len(b.PrevBlockHash) != 0) {
 		return ErrInvalidCoinbase
 	}
 	return nil
