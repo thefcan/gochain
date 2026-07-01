@@ -67,13 +67,22 @@ func (n *Node) Listen(addr string) (net.Listener, error) {
 	return ln, nil
 }
 
+// maxConcurrentConns bounds how many peer connections are served at once, so a
+// connection flood cannot spawn unbounded goroutines.
+const maxConcurrentConns = 128
+
 func (n *Node) serve(ln net.Listener) {
+	sem := make(chan struct{}, maxConcurrentConns)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return // listener closed
 		}
-		go n.handle(conn)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem }()
+			n.handle(conn)
+		}()
 	}
 }
 
